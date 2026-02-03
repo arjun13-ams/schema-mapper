@@ -4,11 +4,12 @@ export function generatePython(
   mappings: MappingRule[],
   inputType: FileType,
   outputType: FileType,
-  notes: string
+  notes: string,
+  outputSchema?: any
 ): string {
   const imports = generateImports(inputType, outputType);
   const parseInput = generateInputParser(inputType);
-  const transform = generateTransform(mappings, outputType);
+  const transform = generateTransform(mappings, outputType, outputSchema);
   const notesComment = notes ? `"""\nMapping Notes:\n${notes}\n"""\n\n` : '';
 
   return `${notesComment}${imports}\n\n${parseInput}\n\n${transform}\n\n# Execute transformation
@@ -36,12 +37,20 @@ function generateInputParser(inputType: FileType): string {
     return json.loads(input_var_1)`;
 }
 
-function generateTransform(mappings: MappingRule[], outputType: FileType): string {
+function generateTransform(mappings: MappingRule[], outputType: FileType, outputSchema?: any): string {
+  // Collect array paths from output schema
+  const arrayPaths = new Set<string>();
+  if (outputSchema) {
+    collectArrayPaths(outputSchema, '', arrayPaths);
+  }
+  
+  const arrayPathsArray = JSON.stringify(Array.from(arrayPaths));
+  
   const mappingLines = mappings.map(m => {
     if (m.ruleType === 'constant') {
-      return `    set_nested_value(output, "${m.outputPath}", "${m.constantValue}")`;
+      return `    set_nested_value(output, "${m.outputPath}", "${m.constantValue}", array_paths)`;
     }
-    return `    set_nested_value(output, "${m.outputPath}", get_value(data, "${m.sourcePath}"))`;
+    return `    set_nested_value(output, "${m.outputPath}", get_value(data, "${m.sourcePath}"), array_paths)`;
   }).join('\n');
 
   const getValueFunction = `def get_value(data, path):
@@ -110,39 +119,66 @@ function generateTransform(mappings: MappingRule[], outputType: FileType): strin
         return value.text
     return value`;
 
-  const setNestedValueFunction = `def set_nested_value(obj, path, value):
+  const setNestedValueFunction = `def set_nested_value(obj, path, value, array_paths):
     keys = path.split('.')
     for i, key in enumerate(keys[:-1]):
         if key.isdigit():
             continue
         
+        # Build current path to check if it should be an array
+        current_path = '.'.join(keys[:i+1])
+        
         if key not in obj:
             next_key = keys[i + 1] if i + 1 < len(keys) else None
-            if next_key and next_key.isdigit():
+            # Check if this path should be an array
+            if current_path in array_paths:
+                obj[key] = [{}]
+            elif next_key and next_key.isdigit():
                 obj[key] = []
             else:
                 obj[key] = {}
         
         if isinstance(obj[key], list):
-            next_key = keys[i + 1]
-            if next_key.isdigit():
-                idx = int(next_key)
-                while len(obj[key]) <= idx:
-                    obj[key].append({})
-                obj = obj[key][idx]
+            # Ensure we have at least one item in the array
+            if len(obj[key]) == 0:
+                obj[key].append({})
+            obj = obj[key][0]  # Always use first item for mapping
         else:
             obj = obj[key]
     
     final_key = keys[-1]
     if not final_key.isdigit():
-        obj[final_key] = value`;
+        # Check if final key should be an array
+        final_path = '.'.join(keys)
+        if final_path in array_paths:
+            obj[final_key] = [value] if not isinstance(value, list) else value
+        else:
+            obj[final_key] = value`;
 
   const transformFunction = `def transform(data):
     output = {}
+    array_paths = ${arrayPathsArray}
     
 ${mappingLines}
     
     return json.dumps(output, indent=2)`;
 
   return `${getValueFunction}\n\n${setNestedValueFunction}\n\n${transformFunction}`;
+}
+
+
+function collectArrayPaths(nodes: any[], parentPath: string, arrayPaths: Set<string>): void {
+  if (!Array.isArray(nodes)) return;
+  
+  for (const node of nodes) {
+    const currentPath = parentPath ? `${parentPath}.${node.name}` : node.name;
+    
+    if (node.type === 'array') {
+      arrayPaths.add(currentPath);
+    }
+    
+    if (node.children && node.children.length > 0) {
+      collectArrayPaths(node.children, currentPath, arrayPaths);
+    }
+  }
 }

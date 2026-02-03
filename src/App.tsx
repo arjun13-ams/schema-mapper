@@ -221,7 +221,7 @@ export default function App() {
   const canGenerateXSLT = state.inputType === 'xml' && state.outputType === 'xml' && state.mappings.length > 0;
 
   const handleGeneratePython = () => {
-    const code = generatePython(state.mappings, state.inputType!, state.outputType!, state.mappingNotes);
+    const code = generatePython(state.mappings, state.inputType!, state.outputType!, state.mappingNotes, state.outputSchema);
     setState(s => ({ ...s, generatedCode: { ...s.generatedCode, python: code } }));
   };
 
